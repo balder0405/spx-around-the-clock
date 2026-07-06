@@ -35,13 +35,13 @@ h1,h2,h3,p,span,div {font-family: -apple-system,'Segoe UI',Helvetica,Arial,sans-
 .bigpx .lbl {color:#7c8aa5; font-size:12px; letter-spacing:2.5px; text-transform:uppercase;}
 .bigpx .src {color:#94a3b8; font-size:12.5px; margin-top:4px;}
 .cardrow {display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin:20px 0;}
-.card {background: rgba(255,255,255,.035); border:1px solid rgba(148,163,184,.16); border-radius:16px;
+.card {box-sizing:border-box; background: rgba(255,255,255,.035); border:1px solid rgba(148,163,184,.16); border-radius:16px;
   padding:16px 22px; min-width:168px; text-align:center; backdrop-filter: blur(6px);}
 .card .k {color:#7c8aa5; font-size:10.5px; letter-spacing:2px; text-transform:uppercase;}
 .card .v {color:#f1f5f9; font-size:26px; font-weight:800; margin-top:3px; font-variant-numeric: tabular-nums;}
 .card .d {font-size:12px; margin-top:2px;}
 .up {color:#34d399;} .dn {color:#f87171;} .mut {color:#7c8aa5;}
-.venue {display:flex; align-items:center; justify-content:space-between; padding:11px 18px;
+.venue {box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; padding:11px 18px;
   background: rgba(255,255,255,.03); border:1px solid rgba(148,163,184,.12); border-radius:12px; margin:7px 0;}
 .venue .n {color:#e2e8f0; font-weight:600; font-size:14px;}
 .venue .meta {color:#64748b; font-size:11.5px; margin-top:1px;}
@@ -52,7 +52,61 @@ h1,h2,h3,p,span,div {font-family: -apple-system,'Segoe UI',Helvetica,Arial,sans-
   padding:12px 16px; color:#93c5fd; font-size:13px; margin:12px 0;}
 .foot {color:#5b6b85; font-size:11.5px; text-align:center; margin-top:34px; line-height:1.8;}
 .foot a {color:#7c8aa5;}
+
+.desk {display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin: 8px 0 4px;}
+.catcard {box-sizing:border-box; width:236px; background: rgba(255,255,255,.035); border:1px solid rgba(148,163,184,.16);
+  border-radius:16px; overflow:hidden; text-align:center;}
+.catcard img {width:100%; height:190px; object-fit:cover; display:block;}
+.catcard .cn {color:#f1f5f9; font-weight:800; font-size:14px; margin:9px 0 2px;}
+.catcard .cr {color:#7c8aa5; font-size:11.5px; padding: 0 10px 12px; line-height:1.45;}
+.ctarow {display:flex; gap:12px; justify-content:center; flex-wrap:wrap; margin: 18px 0 6px;}
+.btn {display:inline-block; padding: 12px 26px; border-radius: 12px; font-weight:800; font-size:14.5px;
+  text-decoration:none !important; letter-spacing:.3px;}
+.btn.sub {background: linear-gradient(90deg,#f97316,#fb923c); color:#fff !important; box-shadow: 0 4px 22px rgba(249,115,22,.35);}
+.btn.x {background: rgba(255,255,255,.07); color:#f1f5f9 !important; border:1px solid rgba(148,163,184,.3);}
+.ctatxt {text-align:center; color:#94a3b8; font-size:13px; margin-top:8px;}
+.hlogo {width:52px; height:52px; border-radius:50%; vertical-align:middle; margin-right:6px; border:2px solid rgba(148,163,184,.35);}
+@media (max-width: 640px) {
+  .catcard {width: calc(50% - 10px);}
+  .catcard img {height: 140px;}
+  .btn {padding: 10px 18px; font-size: 13px;}
+}
+
+/* ── mobile ── */
+@media (max-width: 640px) {
+  .block-container {padding: 1.2rem 0.8rem;}
+  .hero .title {font-size: 21px; padding: 0 6px;}
+  .hero .sub {font-size: 11px; padding: 0 8px;}
+  .statuspill {font-size: 11px; padding: 5px 12px;}
+  .bigpx .num {font-size: 52px;}
+  .bigpx .src {font-size: 10.5px; padding: 0 10px;}
+  .cardrow {gap: 8px; margin: 14px 0;}
+  .card {min-width: calc(50% - 12px); flex: 1 1 calc(50% - 12px); padding: 12px 10px;}
+  .card .v {font-size: 20px;}
+  .venue {padding: 9px 12px; flex-wrap: wrap; gap: 4px;}
+  .venue .n {font-size: 12.5px;}
+  .venue .meta {font-size: 10px;}
+  .venue .p {font-size: 14px;}
+  .sechead {font-size: 11px; letter-spacing: 1.5px;}
+  .note {font-size: 11.5px; padding: 10px 12px;}
+  .foot {font-size: 10px; padding: 0 8px;}
+}
 </style>""", unsafe_allow_html=True)
+
+
+
+SUBSTACK = "https://substack.com/@balder714059"
+XLINK = "https://x.com/Balder13946731"
+
+
+def _b64(name):
+    import base64
+    from pathlib import Path
+    try:
+        fp = Path(__file__).parent / name
+        return "data:image/jpeg;base64," + base64.b64encode(fp.read_bytes()).decode()
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -127,9 +181,11 @@ d = fetch_all()
 now = d["asof"]
 state, state_txt, scol = market_state(now)
 
+_logo = _b64("cat_boss.jpg")
+_logo_html = f'<img class="hlogo" src="{_logo}">' if _logo else "🌐"
 st.markdown(f"""
 <div class="hero">
-  <div class="title">🌐 SPX <span class="accent">Around the Clock</span></div>
+  <div class="title">{_logo_html} SPX <span class="accent">Around the Clock</span></div>
   <div class="sub">what S&amp;P risk is trading at right now, from whichever venue is awake · no forecasts, only prints</div>
   <div class="statuspill" style="background:{scol}22; color:{scol}; border:1px solid {scol}55;">{state_txt}</div>
 </div>""", unsafe_allow_html=True)
@@ -196,7 +252,7 @@ try:
                            showarrow=False, font=dict(color="#f8fafc", size=13),
                            bgcolor="rgba(52,211,153,.25)", borderpad=4, xanchor="left")
     fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      height=380, margin=dict(l=10, r=64, t=10, b=10),
+                      height=330, margin=dict(l=6, r=54, t=8, b=8),
                       legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11, color="#94a3b8")),
                       xaxis=dict(gridcolor="rgba(148,163,184,.08)", color="#64748b"),
                       yaxis=dict(gridcolor="rgba(148,163,184,.08)", color="#64748b",
@@ -234,7 +290,31 @@ if d["vix"]:
     venues += vrow("VIX", f"CBOE · delayed · {d['vix']['ts']:%a %-I:%M %p ET}", f"{d['vix']['px']:.2f}")
 st.markdown(venues, unsafe_allow_html=True)
 
+
+# ── the desk (cats) + subscribe/follow CTA ──
+st.markdown('<div class="sechead">Meet the desk 🐾</div>', unsafe_allow_html=True)
+_cats = [
+    ("cat_boss.jpg", "Balder", "Chief Picks Officer — wears the bow tie, calls the overnight book."),
+    ("cat_mascot.jpg", "The official portrait", "commissioned after three green nights in a row."),
+    ("cat_risk.jpg", "Head of Risk", "unimpressed by your leverage since 2024."),
+    ("cat_interns.jpg", "The research interns", "seven pairs of eyes on the tape. mostly napping."),
+]
+_cards = ""
+for _f, _n, _r in _cats:
+    _src = _b64(_f)
+    if _src:
+        _cards += f'<div class="catcard"><img src="{_src}"><div class="cn">{_n}</div><div class="cr">{_r}</div></div>'
+if _cards:
+    st.markdown(f'<div class="desk">{_cards}</div>', unsafe_allow_html=True)
+st.markdown(f"""
+<div class="ctarow">
+  <a class="btn sub" href="{SUBSTACK}" target="_blank">📬 Subscribe on Substack — daily picks &amp; research</a>
+  <a class="btn x" href="{XLINK}" target="_blank">𝕏 Follow @Balder13946731</a>
+</div>
+<div class="ctatxt">If this tracker is useful, a sub or a follow keeps the cat fed 🐟 — it's free.</div>
+""", unsafe_allow_html=True)
+
 st.markdown(f"""<div class="foot">
 🐱 built by <b>Balder's Opus Picks</b> · raw prints from public delayed feeds · refreshes every 60s · nothing here is a forecast or financial advice<br>
-<a href="https://open.substack.com/pub/baldertrader">daily research &amp; picks on Substack →</a> · page rendered {now:%A %b %d, %-I:%M:%S %p ET}
+<a href="https://substack.com/@balder714059">daily research &amp; picks on Substack →</a> · <a href="https://x.com/Balder13946731">𝕏 @Balder13946731</a> · page rendered {now:%A %b %d, %-I:%M:%S %p ET}
 </div>""", unsafe_allow_html=True)
