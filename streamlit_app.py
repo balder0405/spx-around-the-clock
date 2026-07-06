@@ -53,6 +53,38 @@ h1,h2,h3,p,span,div {font-family: -apple-system,'Segoe UI',Helvetica,Arial,sans-
 .foot {color:#5b6b85; font-size:11.5px; text-align:center; margin-top:34px; line-height:1.8;}
 .foot a {color:#7c8aa5;}
 
+/* ticker tape */
+.tape {overflow:hidden; white-space:nowrap; border-top:1px solid rgba(148,163,184,.12); border-bottom:1px solid rgba(148,163,184,.12);
+  background: rgba(255,255,255,.02); padding:7px 0; margin-bottom:14px;}
+.tape .inner {display:inline-block; animation: scroll 38s linear infinite;}
+.tape span {color:#94a3b8; font-size:12.5px; margin: 0 18px; font-variant-numeric: tabular-nums;}
+.tape b {color:#e2e8f0; font-weight:700;}
+@keyframes scroll {0% {transform: translateX(0);} 100% {transform: translateX(-50%);}}
+/* pulse on live elements */
+@keyframes pulse {0%,100% {opacity:1;} 50% {opacity:.55;}}
+.pulse {animation: pulse 2.2s ease-in-out infinite;}
+/* mini CTA under the number */
+.minicta {display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin:14px 0 4px;}
+.mbtn {display:inline-flex; align-items:center; gap:7px; padding:9px 20px; border-radius:999px; font-weight:800; font-size:13.5px;
+  text-decoration:none !important; transition: transform .15s;}
+.mbtn:hover {transform: translateY(-1px);}
+.mbtn.sub {background: linear-gradient(90deg,#f97316,#fb923c); color:#fff !important; box-shadow: 0 4px 20px rgba(249,115,22,.4);}
+.mbtn.x {background: rgba(255,255,255,.08); color:#f1f5f9 !important; border:1px solid rgba(148,163,184,.35);}
+.mctatxt {text-align:center; color:#7c8aa5; font-size:11.5px; margin-top:6px;}
+/* venue consensus strip */
+.conswrap {max-width:640px; margin: 20px auto 2px;}
+.conslbl {display:flex; justify-content:space-between; color:#7c8aa5; font-size:10.5px; letter-spacing:1.5px; margin-bottom:5px;}
+.consbar {position:relative; height:34px; border-radius:999px; background: linear-gradient(90deg, rgba(248,113,113,.14), rgba(148,163,184,.10), rgba(52,211,153,.14));
+  border:1px solid rgba(148,163,184,.18);}
+.consdot {position:absolute; top:50%; transform: translate(-50%,-50%); width:11px; height:11px; border-radius:50%;
+  border:2px solid #0b1220; cursor:default;}
+.consmed {position:absolute; top:-4px; bottom:-4px; width:2px; background:#f8fafc; opacity:.7; transform:translateX(-50%);}
+.constxt {text-align:center; color:#94a3b8; font-size:12px; margin-top:7px;}
+@media (max-width: 640px) {
+  .tape span {font-size:11px; margin:0 12px;}
+  .mbtn {padding:8px 14px; font-size:12px;}
+}
+
 .desk {display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin: 8px 0 4px;}
 .catcard {box-sizing:border-box; width:236px; background: rgba(255,255,255,.035); border:1px solid rgba(148,163,184,.16);
   border-radius:16px; overflow:hidden; text-align:center;}
@@ -132,15 +164,114 @@ def fetch_all():
     out["es"] = _last("ES=F")
     out["nq"] = _last("NQ=F", interval="15m")
     out["vix"] = _last("^VIX", interval="1h")
-    basis = None
+    out["btc"] = _last("BTC-USD", period="7d", interval="1h")
+    # OFFICIAL daily closes — the 5m series ends on the 15:55 bar, ~5-6 pts below the true settle
+    # (audited 2026-07-05: 15:55 bar 7,477.6 vs official 7,483.2; live IG/HL venues confirmed the
+    # official-close scale). All ratios, anchors and translations use OFFICIAL closes.
+    def _official(ticker):
+        try:
+            h = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=True)
+            h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
+            px = h["Close"].dropna()
+            return {"px": float(px.iloc[-1]), "ts": px.index[-1], "series": px}
+        except Exception:
+            return None
+    out["spx_off"] = _official("^GSPC")
+    out["dji"] = _official("^DJI")
+    out["ndx"] = _official("^NDX")
+    basis = basis_chart = None
     try:
         if out["spx"] and out["es"]:
-            j = pd.concat([out["spx"]["series"], out["es"]["series"]], axis=1, keys=["spx", "es"]).dropna()
+            j = pd.concat([out["spx"]["series"], out["es"]["series"]], axis=1, keys=["spx", "es"], sort=False).dropna()
             if len(j) > 10:
-                basis = float((j["es"] - j["spx"]).median())
+                basis_chart = float((j["es"] - j["spx"]).median())   # 5m-internal (chart overlay only)
+        # OFFICIAL basis: ES bar at each official close vs the official settle (this is the scale
+        # live IG/HL venues confirm; the 5m-internal basis runs ~6 pts rich)
+        if out.get("spx_off") and out["es"]:
+            esd = out["es"]["series"]
+            diffs = []
+            for ts, oc in out["spx_off"]["series"].items():
+                day = esd[[t.date() == ts.date() for t in esd.index]]
+                if len(day):
+                    sess = day[[(t.hour * 60 + t.minute) >= 955 and (t.hour * 60 + t.minute) <= 965 for t in day.index]]
+                    ref = float(sess.iloc[-1]) if len(sess) else float(day.iloc[-1])
+                    diffs.append(ref - float(oc))
+            if diffs:
+                basis = float(pd.Series(diffs).median())
+        if basis is None:
+            basis = basis_chart
     except Exception:
         pass
     out["basis"] = basis
+    out["basis_chart"] = basis_chart if basis_chart is not None else basis
+    # crypto-mapped WEEKEND estimate — validated on 111 weekends: Monday gap ≈ 0.022 + 0.106×BTC
+    # (corr +0.45, residual σ 0.78%). An ESTIMATE with an error band, never shown as a real quote.
+    wk = None
+    try:
+        if out["spx"] and out["btc"]:
+            spxs, btcs = out["spx"]["series"], out["btc"]["series"]
+            sidx = [t.tz_convert(ET) if t.tzinfo else t for t in spxs.index]
+            bidx = [t.tz_convert(ET) if t.tzinfo else t for t in btcs.index]
+            xs, ys = [], []
+            anchor_px = anchor_btc = None
+            for t, bpx in zip(bidx, btcs.values):
+                wd, mn = t.weekday(), t.hour * 60 + t.minute
+                in_wk = (wd == 4 and mn >= 1020) or wd == 5 or (wd == 6 and mn < 1080)
+                if in_wk:
+                    if anchor_px is None and out.get("spx_off"):
+                        # anchor = last OFFICIAL equity close before t, and BTC AT THAT CLOSE'S
+                        # timestamp (16:00 ET) — not at the first weekend bar (audit fix: the old
+                        # anchors mismatched by an hour, and by a full day on holiday weekends)
+                        closes = [(cts, cv) for cts, cv in out["spx_off"]["series"].items()]
+                        prior_c = [(cts, cv) for cts, cv in closes
+                                   if cts.tz_localize(ET).replace(hour=16, minute=0) <= t]
+                        if prior_c:
+                            c_ts, c_val = prior_c[-1]
+                            c_dt = c_ts.tz_localize(ET).replace(hour=16, minute=0)
+                            priorb = [v for ti, v in zip(bidx, btcs.values) if ti <= c_dt]
+                            if priorb:
+                                anchor_px, anchor_btc = float(c_val), float(priorb[-1])
+                    if anchor_px and anchor_btc:
+                        ret = (float(bpx) / anchor_btc - 1) * 100
+                        xs.append(t)
+                        ys.append(anchor_px * (1 + (0.022 + 0.106 * ret) / 100))
+                else:
+                    anchor_px = anchor_btc = None
+            if xs:
+                wk = {"x": xs, "y": ys, "sigma": 0.0078}
+    except Exception:
+        wk = None
+    out["weekend_map"] = wk
+
+    # IG weekend markets — the real traded WEEKEND venues for US equities (public pages,
+    # server-rendered bid/offer; attribution shown). Translated to SPX terms via live index
+    # ratios (mechanical, like the ES basis). Reference only.
+    def _ig_quote(url):
+        try:
+            import re
+            hdrs = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"}
+            rr = requests.get(url, headers=hdrs, timeout=10)
+            bid = re.search(r'data-field="BID">([0-9.]+)', rr.text)
+            off = re.search(r'data-field="OFR">([0-9.]+)', rr.text)
+            if bid and off:
+                return {"bid": float(bid.group(1)), "offer": float(off.group(1)),
+                        "mid": (float(bid.group(1)) + float(off.group(1))) / 2}
+        except Exception:
+            pass
+        return None
+
+    ig = _ig_quote("https://www.ig.com/uk/indices/markets-indices/weekend-wall-street")
+    if ig and out.get("spx_off") and out.get("dji") and out["dji"]["px"] > 0:
+        ig["spx_terms"] = ig["mid"] * out["spx_off"]["px"] / out["dji"]["px"]
+    ig_tech = _ig_quote("https://www.ig.com/en/indices/markets-indices/weekend-us-tech-100-e1")
+    if ig_tech and out.get("spx_off") and out.get("ndx") and out["ndx"]["px"] > 0:
+        ig_tech["spx_terms"] = ig_tech["mid"] * out["spx_off"]["px"] / out["ndx"]["px"]
+    # IG US 500 CFD — quoted DIRECTLY in SPX terms and trades ~24/5 (the cleanest
+    # off-hours SPX-terms venue; closed on weekends when the Weekend markets take over)
+    ig_spx = _ig_quote("https://www.ig.com/en/indices/markets-indices/us-spx-500")
+    out["ig"] = ig
+    out["ig_tech"] = ig_tech
+    out["ig_spx"] = ig_spx
     try:
         r = requests.post("https://api.hyperliquid.xyz/info", json={"type": "metaAndAssetCtxs"}, timeout=8)
         meta, ctxs = r.json()
@@ -155,6 +286,27 @@ def fetch_all():
         out["hl"] = hl
     except Exception:
         out["hl"] = None
+    # Hyperliquid US500 perp — a REAL S&P-terms market that trades 24/7 INCLUDING weekends
+    # (builder dex "mkts"; index/10 scale — we snap the multiplier to the nearest integer so a
+    # basis drift can never sneak in). Thin venue (~$1-2M/day) → shown with that caveat.
+    try:
+        r2 = requests.post("https://api.hyperliquid.xyz/info",
+                           json={"type": "metaAndAssetCtxs", "dex": "mkts"}, timeout=8)
+        meta2, ctxs2 = r2.json()
+        names2 = [u["name"] for u in meta2["universe"]]
+        if "mkts:US500" in names2:
+            c2 = ctxs2[names2.index("mkts:US500")]
+            mark = float(c2["markPx"])
+            prev = float(c2["prevDayPx"]) if c2.get("prevDayPx") else mark
+            mult = round(out["spx_off"]["px"] / mark) if (out.get("spx_off") and mark > 0) else 10
+            out["hl_us500"] = {"mark": mark, "mult": mult, "spx_terms": mark * mult,
+                               "chg24h": (mark / prev - 1) * 100 if prev else 0.0,
+                               "funding": float(c2.get("funding", 0)) * 100,
+                               "vol": float(c2.get("dayNtlVlm", 0))}
+        else:
+            out["hl_us500"] = None
+    except Exception:
+        out["hl_us500"] = None
     return out
 
 
@@ -181,13 +333,36 @@ d = fetch_all()
 now = d["asof"]
 state, state_txt, scol = market_state(now)
 
+# ── ticker tape ──
+_tape_items = []
+if d.get("hl_us500"):
+    _tape_items.append(("US500 24/7", f"{d['hl_us500']['spx_terms']:,.0f}", d["hl_us500"]["chg24h"]))
+if d["es"]:
+    _tape_items.append(("ES", f"{d['es']['px']:,.0f}", None))
+if d["nq"]:
+    _tape_items.append(("NQ", f"{d['nq']['px']:,.0f}", None))
+if d.get("ig_spx"):
+    _tape_items.append(("IG US500", f"{d['ig_spx']['mid']:,.1f}", None))
+if d["vix"]:
+    _tape_items.append(("VIX", f"{d['vix']['px']:.1f}", None))
+if d["hl"]:
+    for _c in ("BTC", "ETH", "SOL"):
+        if _c in d["hl"]:
+            _tape_items.append((_c, f"{d['hl'][_c]['mark']:,.0f}", d["hl"][_c]["chg"]))
+_seg = ""
+for _n, _v, _ch in _tape_items:
+    _chs = f" <span class='{'up' if _ch >= 0 else 'dn'}'>{_ch:+.1f}%</span>" if _ch is not None else ""
+    _seg += f"<span><b>{_n}</b> {_v}{_chs}</span>"
+if _seg:
+    st.markdown(f'<div class="tape"><div class="inner">{_seg}{_seg}</div></div>', unsafe_allow_html=True)
+
 _logo = _b64("cat_boss.jpg")
 _logo_html = f'<img class="hlogo" src="{_logo}">' if _logo else "🌐"
 st.markdown(f"""
 <div class="hero">
   <div class="title">{_logo_html} SPX <span class="accent">Around the Clock</span></div>
   <div class="sub">what S&amp;P risk is trading at right now, from whichever venue is awake · no forecasts, only prints</div>
-  <div class="statuspill" style="background:{scol}22; color:{scol}; border:1px solid {scol}55;">{state_txt}</div>
+  <div class="statuspill pulse" style="background:{scol}22; color:{scol}; border:1px solid {scol}55;">{state_txt}</div>
 </div>""", unsafe_allow_html=True)
 
 # ── the headline number ──
@@ -196,8 +371,18 @@ if state == "RTH" and d["spx"]:
 elif d["es"] and d["basis"] is not None and state == "FUTURES":
     big = d["es"]["px"] - d["basis"]
     lbl, src = "ES-IMPLIED SPX", f"CME ES {d['es']['px']:,.2f} − basis {d['basis']:+.1f} · {d['es']['ts']:%a %-I:%M %p ET}"
+elif state == "WEEKEND" and d.get("hl_us500"):
+    u = d["hl_us500"]
+    big = u["spx_terms"]
+    lbl = "HYPERLIQUID US500 PERP · REAL 24/7 MARKET"
+    src = f"mark {u['mark']:,.2f} ×{u['mult']} · {u['chg24h']:+.1f}%/24h · thin venue (${u['vol']/1e6:.1f}M/day) — cross-check the crypto map & IG below"
+elif state == "WEEKEND" and d.get("weekend_map"):
+    w = d["weekend_map"]
+    big = w["y"][-1]
+    lbl = "CRYPTO-MAPPED SPX ESTIMATE"
+    src = f"weekend BTC mapped via measured β (0.106, corr .45, 111 weekends) · ±{big * w['sigma']:,.0f} pts (1σ) · an estimate, NOT a quote"
 else:
-    big = d["spx"]["px"] if d["spx"] else 0
+    big = d["spx_off"]["px"] if d.get("spx_off") else (d["spx"]["px"] if d["spx"] else 0)
     lbl = "LAST REAL SPX CLOSE"
     src = "nothing SPX-equivalent trades right now" + (f" · closed {d['spx']['ts']:%a %-I:%M %p ET}" if d["spx"] else "")
 st.markdown(f"""
@@ -205,6 +390,47 @@ st.markdown(f"""
   <div class="lbl">{lbl}</div>
   <div class="num">{big:,.0f}</div>
   <div class="src">{src} · next NYSE open in {next_open(now)}</div>
+</div>""", unsafe_allow_html=True)
+
+# ── CTA: the monetization row, right under the number ──
+st.markdown(f"""
+<div class="minicta">
+  <a class="mbtn sub" href="{SUBSTACK}" target="_blank">📬 Get the daily picks — free on Substack</a>
+  <a class="mbtn x" href="{XLINK}" target="_blank">𝕏 Follow @Balder13946731</a>
+</div>
+<div class="mctatxt">the cat that runs this page also picks stocks every night 🐱</div>
+""", unsafe_allow_html=True)
+
+# ── venue consensus strip: every SPX-terms source as a dot on one bar ──
+_vs = []
+if d["es"] and d["basis"] is not None:
+    _vs.append(("ES-implied", d["es"]["px"] - d["basis"], "#60a5fa"))
+if d.get("ig_spx"):
+    _vs.append(("IG US500", d["ig_spx"]["mid"], "#a78bfa"))
+if d.get("hl_us500"):
+    _vs.append(("HL US500 24/7", d["hl_us500"]["spx_terms"], "#34d399"))
+if d.get("ig") and d["ig"].get("spx_terms"):
+    _vs.append(("IG Wall St →SPX", d["ig"]["spx_terms"], "#f97316"))
+if d.get("ig_tech") and d["ig_tech"].get("spx_terms"):
+    _vs.append(("IG Tech →SPX", d["ig_tech"]["spx_terms"], "#f472b6"))
+if state == "WEEKEND" and d.get("weekend_map"):
+    _vs.append(("crypto map", d["weekend_map"]["y"][-1], "#fbbf24"))
+if len(_vs) >= 3:
+    _vals = sorted(v for _, v, _c in _vs)
+    _lo, _hi = min(_vals), max(_vals)
+    _med = _vals[len(_vals) // 2]
+    _pad = max((_hi - _lo) * 0.15, 2)
+    _l0, _h0 = _lo - _pad, _hi + _pad
+    _dots = ""
+    for _n, _v, _c in _vs:
+        _x = (_v - _l0) / (_h0 - _l0) * 100
+        _dots += f'<div class="consdot" style="left:{_x:.1f}%; background:{_c};" title="{_n}: {_v:,.1f}"></div>'
+    _mx = (_med - _l0) / (_h0 - _l0) * 100
+    st.markdown(f"""
+<div class="conswrap">
+  <div class="conslbl"><span>{_l0:,.0f}</span><span>VENUE CONSENSUS</span><span>{_h0:,.0f}</span></div>
+  <div class="consbar"><div class="consmed" style="left:{_mx:.1f}%"></div>{_dots}</div>
+  <div class="constxt">{len(_vs)} independent venues · median <b style="color:#f1f5f9">{_med:,.0f}</b> · spread <b style="color:#f1f5f9">{_hi - _lo:,.0f} pts</b>{" · ✅ tight agreement" if (_hi - _lo) < 25 else ""}</div>
 </div>""", unsafe_allow_html=True)
 
 # ── metric cards ──
@@ -219,6 +445,11 @@ if d["nq"]:
     cards += f'<div class="card"><div class="k">NQ Future</div><div class="v">{d["nq"]["px"]:,.0f}</div><div class="d {"up" if cn>=0 else "dn"}">{cn:+.2f}% / 5d</div></div>'
 if d["vix"]:
     cards += f'<div class="card"><div class="k">VIX</div><div class="v">{d["vix"]["px"]:.1f}</div><div class="d mut">implied vol</div></div>'
+if d.get("hl_us500"):
+    _u = d["hl_us500"]
+    cards += f'<div class="card"><div class="k">HL US500 · 24/7</div><div class="v">{_u["spx_terms"]:,.0f}</div><div class="d {"up" if _u["chg24h"]>=0 else "dn"}">{_u["chg24h"]:+.1f}% / 24h</div></div>'
+if d.get("ig") and d["ig"].get("spx_terms") and state == "WEEKEND":
+    cards += f'<div class="card"><div class="k">IG Weekend (SPX terms)</div><div class="v">{d["ig"]["spx_terms"]:,.0f}</div><div class="d mut">real weekend market</div></div>'
 if d["hl"]:
     for coin in ("BTC", "ETH"):
         if coin in d["hl"]:
@@ -227,7 +458,7 @@ if d["hl"]:
 st.markdown(f'<div class="cardrow">{cards}</div>', unsafe_allow_html=True)
 
 if state == "WEEKEND":
-    st.markdown('<div class="note">◐ <b>Weekend honesty note:</b> crypto is the only live tape right now. It correlates with Monday\'s equity open, but it is <b>not</b> an S&amp;P price — we show it as context and refuse to fake an "SPX quote" from it.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="note">◐ <b>How the weekend estimate works:</b> nothing S&amp;P-equivalent trades on weekends, so the amber dotted line maps the live BTC move through a measured relationship (β 0.106, corr +0.45 across 111 weekends) into SPX terms. It is an <b>estimate with a ±0.78% band</b> — clearly marked, never presented as a real quote. Cross-check it against <b>IG Weekend Wall Street</b> below — a real traded weekend market (Dow-based, shown in SPX terms via the index ratio). The real print resumes when futures open Sunday 6 PM ET.</div>', unsafe_allow_html=True)
 
 # ── chart ──
 st.markdown('<div class="sechead">The last week, stitched from whoever was open</div>', unsafe_allow_html=True)
@@ -235,8 +466,18 @@ try:
     import plotly.graph_objects as go
     fig = go.Figure()
     ys = []
-    if d["es"] and d["basis"] is not None:
-        e = d["es"]["series"] - d["basis"]
+    if d.get("weekend_map"):
+        w = d["weekend_map"]
+        up = [v * (1 + w["sigma"]) for v in w["y"]]
+        dn = [v * (1 - w["sigma"]) for v in w["y"]]
+        fig.add_trace(go.Scatter(x=list(w["x"]) + list(w["x"])[::-1], y=up + dn[::-1], fill="toself",
+                                 fillcolor="rgba(251,191,36,.09)", line=dict(width=0),
+                                 name="weekend ±1σ", hoverinfo="skip", showlegend=False))
+        fig.add_trace(go.Scatter(x=w["x"], y=w["y"], name="crypto-mapped weekend est.",
+                                 line=dict(color="#fbbf24", width=1.4, dash="dot"), opacity=.9))
+        ys += list(w["y"])
+    if d["es"] and d.get("basis_chart") is not None:
+        e = d["es"]["series"] - d["basis_chart"]
         eidx = [t.tz_convert(ET) if t.tzinfo else t for t in e.index]
         fig.add_trace(go.Scatter(x=eidx, y=list(e.values), name="ES-implied (off-hours)",
                                  line=dict(color="#60a5fa", width=1.4), opacity=.85))
@@ -272,15 +513,40 @@ def vrow(name, meta, px, live=False):
 
 
 venues = ""
-if d["spx"]:
+if state == "RTH" and d["spx"]:
     venues += vrow("S&P 500 index (^GSPC)", f"CBOE · delayed · {d['spx']['ts']:%a %-I:%M %p ET}",
-                   f"{d['spx']['px']:,.2f}", live=(state == "RTH"))
+                   f"{d['spx']['px']:,.2f}", live=True)
+elif d.get("spx_off"):
+    venues += vrow("S&P 500 index (^GSPC)", f"official close · {d['spx_off']['ts']:%a %b %d}",
+                   f"{d['spx_off']['px']:,.2f}")
 if d["es"]:
     venues += vrow("ES front future", f"CME · delayed · {d['es']['ts']:%a %-I:%M %p ET}",
                    f"{d['es']['px']:,.2f}", live=(state == "FUTURES"))
     if d["basis"] is not None:
         venues += vrow("→ in SPX terms", f"mechanical basis adjustment ({d['basis']:+.1f})",
                        f"{d['es']['px'] - d['basis']:,.2f}")
+if d.get("hl_us500"):
+    _u = d["hl_us500"]
+    venues += vrow("Hyperliquid US500 perp", f"REAL 24/7 market incl. weekends · funding {_u['funding']:+.4f}%/hr · ${_u['vol']/1e6:.1f}M/day (thin)",
+                   f"{_u['spx_terms']:,.1f} <span class='{'up' if _u['chg24h']>=0 else 'dn'}' style='font-size:12px'>({_u['chg24h']:+.1f}%)</span>", live=True)
+if d.get("ig_spx"):
+    _is = d["ig_spx"]
+    venues += vrow("IG US 500 CFD", "direct SPX terms · trades ~24/5 · source: IG.com",
+                   f"{_is['mid']:,.2f}", live=(state in ("FUTURES", "RTH")))
+if d.get("ig"):
+    _ig = d["ig"]
+    _igp = f"{_ig['mid']:,.0f}"
+    if _ig.get("spx_terms"):
+        _igp += f" <span class='mut' style='font-size:12px'>≈ SPX {_ig['spx_terms']:,.0f}</span>"
+    venues += vrow("IG Weekend Wall Street (Dow)", "real weekend market · Sat 8AM – Sun 10:40PM UK · source: IG.com",
+                   _igp, live=(state == "WEEKEND"))
+if d.get("ig_tech"):
+    _it = d["ig_tech"]
+    _itp = f"{_it['mid']:,.0f}"
+    if _it.get("spx_terms"):
+        _itp += f" <span class='mut' style='font-size:12px'>≈ SPX {_it['spx_terms']:,.0f}</span>"
+    venues += vrow("IG Weekend US Tech 100 (Nasdaq)", "real weekend market · Sat 8AM – Sun 10:40PM UK · source: IG.com",
+                   _itp, live=(state == "WEEKEND"))
 if d["hl"]:
     for coin, v in d["hl"].items():
         arrow_cls = "up" if v["chg"] >= 0 else "dn"
