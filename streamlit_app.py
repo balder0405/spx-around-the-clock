@@ -116,6 +116,52 @@ def _b64(name):
         return None
 
 
+# Nasdaq API — Cloud-reliable last/prev official close (Yahoo IP-blocks datacenters; Nasdaq doesn't).
+NASDAQ_H = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126 Safari/537.36", "Accept": "application/json"}
+NASDAQ_AC = {"DRAM": "etf", "SPY": "etf", "NDX": "index"}   # asset class per symbol (rest = 'stocks')
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def nasdaq_refs():
+    """Parallel-fetch each name's last sale + previous close + market status from Nasdaq. The official
+    daily close (the basis for % change) — reliable from Streamlit Cloud where Yahoo is IP-blocked.
+    Cached 30 min (closes change once/day); parallelized so all ~17 names return in a few seconds."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _p(s):
+        return float(s.replace("$", "").replace(",", "")) if s and s not in ("N/A", "", "N/D") else None
+
+    def _one(sym):
+        ac = NASDAQ_AC.get(sym, "stocks")
+        out = {"last": None, "prev": None, "status": None}
+        try:
+            i = requests.get(f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass={ac}",
+                             headers=NASDAQ_H, timeout=8).json()
+            p = (i.get("data") or {}).get("primaryData") or {}
+            out["last"] = _p(p.get("lastSalePrice")); out["status"] = (i.get("data") or {}).get("marketStatus")
+            s = requests.get(f"https://api.nasdaq.com/api/quote/{sym}/summary?assetclass={ac}",
+                             headers=NASDAQ_H, timeout=8).json()
+            sd = (s.get("data") or {}).get("summaryData") or {}
+            out["prev"] = _p((sd.get("PreviousClose") or {}).get("value"))
+        except Exception:
+            pass
+        return sym, out
+    with ThreadPoolExecutor(max_workers=18) as ex:
+        return dict(ex.map(_one, STOCKS + ["SPY", "NDX"]))
+
+
+def ref_close(nd, sym):
+    """The last COMPLETED official close: today's settle once the session is over (marketStatus
+    Closed → lastSale), else yesterday's settle while a session is live (→ PreviousClose)."""
+    r = nd.get(sym)
+    if not r:
+        return None
+    is_open = "open" in (r.get("status") or "").lower() or "market open" in (r.get("status") or "").lower()
+    return (r.get("prev") if is_open else r.get("last")) or r.get("last") or r.get("prev")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all():
     import requests, yfinance as yf
@@ -252,12 +298,13 @@ def next_open(now):
 
 
 d = fetch_all()
+nd = nasdaq_refs()                                    # Cloud-reliable official closes (% basis)
 now = d["asof"]
 state, state_txt, scol = market_state(now)
 us_session = (now.weekday() < 5 and 240 <= now.hour * 60 + now.minute < 1200)   # 4:00–20:00 ET
 
 
-def index_card(name, cash, fut, basis, off, hl, state):
+def index_card(name, cash, fut, basis, off, hl, state, refc=None):
     if state == "RTH" and cash:
         val, src = cash["px"], f"cash index · {cash['ts']:%-I:%M %p ET}"
     elif state in ("OVN", "EXT") and fut and basis is not None:
@@ -270,9 +317,9 @@ def index_card(name, cash, fut, basis, off, hl, state):
         val, src = cash["px"], "delayed print"
     else:
         val, src = None, "—"
-    # % vs the LAST market close (yesterday's settle mid-session, today's once closed);
-    # fall back to the perp's 24h move when the Yahoo close is unavailable
-    ref = (off["prev"] if state == "RTH" else off["last"]) if off else None
+    # % vs the LAST market close — Nasdaq official close (refc) first (works on Cloud), then the
+    # Yahoo close, then the perp's 24h move as the last resort.
+    ref = refc or ((off["prev"] if state == "RTH" else off["last"]) if off else None)
     if val and ref:
         c = (val / ref - 1) * 100
         chs = f"<span class='{'up' if c >= 0 else 'dn'}'>{c:+.2f}% · vs {ref:,.0f} close</span>"
@@ -306,9 +353,12 @@ seg = "".join(f"<span><b>{n}</b> {v}</span>" for n, v in tape)
 if seg:
     st.markdown(f'<div class="tape"><div class="inner">{seg}{seg}</div></div>', unsafe_allow_html=True)
 
+_spy = ref_close(nd, "SPY")
+_spx_ref = _spy * 10 if _spy else None                # Nasdaq has no SPX → SPY×10 proxy for the close
+_ndx_ref = ref_close(nd, "NDX")
 st.markdown('<div class="idxrow">'
-            + index_card("S&amp;P 500 · SPX", d["spx"], d["es"], d["es_basis"], d["spx_off"], d["hl_spx"], state)
-            + index_card("NASDAQ 100 · NDX", d["ndx"], d["nq"], d["nq_basis"], d["ndx_off"], d["hl_ndx"], state)
+            + index_card("S&amp;P 500 · SPX", d["spx"], d["es"], d["es_basis"], d["spx_off"], d["hl_spx"], state, _spx_ref)
+            + index_card("NASDAQ 100 · NDX", d["ndx"], d["nq"], d["nq_basis"], d["ndx_off"], d["hl_ndx"], state, _ndx_ref)
             + '</div>', unsafe_allow_html=True)
 
 st.markdown(f"""<div class="minicta">
@@ -331,14 +381,18 @@ for s in STOCKS:
         src = f"US print · {st_['ts']:%-I:%M %p ET}"
     elif hl:
         px = hl["mark"]
-        badge = ("bthin", "◐ 24/7 THIN") if s in THIN else ("b247", "🌐 24/7")
-        src = f"HL perp · {hl['dex']}" + (f" · {hl['n']} venues" if hl["n"] > 1 else "") + f" · ${hl['vol']/1e6:.1f}M/d"
+        if us_session:                       # market open/extended → present it as the live read
+            badge = ("brth", "● LIVE") if state == "RTH" else ("bext", "◑ EXT")
+            src = f"HL perp ≈ spot · live hrs · ${hl['vol']/1e6:.1f}M/d"
+        else:
+            badge = ("bthin", "◐ 24/7 THIN") if s in THIN else ("b247", "🌐 24/7")
+            src = f"HL perp · {hl['dex']}" + (f" · {hl['n']} venues" if hl["n"] > 1 else "") + f" · ${hl['vol']/1e6:.1f}M/d"
     elif "real" in st_:
         px = st_["real"]; badge = ("bext", "LAST"); src = f"last print · {st_['ts']:%-I:%M %p ET}"
     else:
         continue
-    # % vs last market close; for HL-only names (no US listing, e.g. SPCX) fall back to the perp's 24h ref
-    ref = (st_.get("close_prev") if state == "RTH" else st_.get("close_last")) or (hl.get("prev") if hl else None)
+    # % vs the last official market close (Nasdaq, Cloud-reliable); HL-only names fall back to the perp 24h ref
+    ref = ref_close(nd, s) or (hl.get("prev") if hl else None)
     chg = (px / ref - 1) * 100 if ref else None
     chs = f"<div class='ch {'up' if chg >= 0 else 'dn'}'>{chg:+.2f}%</div>" if chg is not None else ""
     dec = 2 if px < 1000 else 0
