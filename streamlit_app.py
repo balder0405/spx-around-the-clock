@@ -9,7 +9,6 @@ with a real 24/7 venue are shown — no fabricated overnight quotes.
 """
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pandas as pd
 import streamlit as st
 
 ET = ZoneInfo("America/New_York")
