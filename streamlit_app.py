@@ -2,8 +2,11 @@
 that actually trade around the clock. Every number is a real print from a named venue with a
 timestamp, or a clearly-marked estimate. Dark terminal edition.
 
-Indices (SPX, NDX): RTH = cash index · overnight = CME futures (ES/NQ) − basis · weekend = Hyperliquid
-US500/USTECH perp (real 24/7). Single stocks: RTH/extended = US consolidated print · overnight+weekend
+Indices (SPX, NDX): RTH = cash index (CBOE) · overnight & weekend = Hyperliquid US500/USTECH perp — the
+real, live 24/7 venue (tracks S&P/Nasdaq futures fair value to <1%, validated). No free CME E-mini feed is
+reachable from Cloud (Yahoo/investing/TradingView all IP-block datacenters; CNBC serves a stale settle), so
+the perp IS our futures-equivalent overnight read, and the card labels it as the futures session when CME is
+open. Single stocks: RTH/extended = US consolidated print · overnight+weekend
 = Hyperliquid single-stock perp mark (builder dexes; marks track spot to <1%, validated). Only names
 with a real 24/7 venue are shown — no fabricated overnight quotes.
 """
@@ -226,6 +229,17 @@ def market_state(now):
     return "OVN", "◎ OVERNIGHT — futures & 24/7 perps", "#60a5fa"
 
 
+def cme_open(now):
+    """CME equity futures (ES/NQ) trade Sun 6pm ET → Fri 5pm ET, with a daily 5–6pm ET maintenance halt.
+    When True, the overnight perp read is the live *futures session*; when False it's a weekend/closed read."""
+    wd, m = now.weekday(), now.hour * 60 + now.minute
+    if wd == 5:                       return False   # Saturday — closed
+    if wd == 6 and m < 1080:          return False   # Sunday before 6:00pm ET
+    if wd == 4 and m >= 1020:         return False   # Friday after 5:00pm ET
+    if wd < 5 and 1020 <= m < 1080:   return False   # daily 5–6pm ET halt (Mon–Fri)
+    return True
+
+
 def next_open(now):
     d = now.replace(hour=9, minute=30, second=0, microsecond=0)
     if now >= d or now.weekday() >= 5:
@@ -240,14 +254,17 @@ d = fetch_all()
 nd = stock_closes()                                   # CBOE official stock closes (% basis), thread-free
 now = d["asof"]
 state, state_txt, scol = market_state(now)
+fut_open = cme_open(now)                               # CME equity futures session live?
 us_session = (now.weekday() < 5 and 240 <= now.hour * 60 + now.minute < 1200)   # 4:00–20:00 ET
 
 
-def index_card(name, cboe, hl, state, refc=None):
+def index_card(name, cboe, hl, state, refc=None, fut_open=False, fut_name="S&P"):
     if state == "RTH" and cboe and cboe.get("cur"):
         val, src = cboe["cur"], "cash index · CBOE"
     elif hl:                       # 24/7 source — overnight, weekends (perp mapped to the real close)
-        val, src = hl["terms"], f"Hyperliquid perp ×{hl['mult']:.2f} · {hl['chg24h']:+.1f}%/24h"
+        val = hl["terms"]
+        sess = f"{fut_name} futures session" if fut_open else "weekend"
+        src = f"{sess} · live 24/7 perp · {hl['chg24h']:+.1f}%/24h"
     elif cboe and cboe.get("close"):
         val, src = cboe["close"], "last close · CBOE"
     else:
@@ -290,8 +307,8 @@ if seg:
 _spx_ref = (d["cboe_spx"] or {}).get("close")                       # exact SPX close (CBOE)
 _ndx_ref = (d["cboe_ndx"] or {}).get("close")                       # exact NDX close (CBOE)
 st.markdown('<div class="idxrow">'
-            + index_card("S&amp;P 500 · SPX", d["cboe_spx"], d["hl_spx"], state, _spx_ref)
-            + index_card("NASDAQ 100 · NDX", d["cboe_ndx"], d["hl_ndx"], state, _ndx_ref)
+            + index_card("S&amp;P 500 · SPX", d["cboe_spx"], d["hl_spx"], state, _spx_ref, fut_open, "S&P")
+            + index_card("NASDAQ 100 · NDX", d["cboe_ndx"], d["hl_ndx"], state, _ndx_ref, fut_open, "Nasdaq")
             + '</div>', unsafe_allow_html=True)
 
 st.markdown(f"""<div class="minicta">
