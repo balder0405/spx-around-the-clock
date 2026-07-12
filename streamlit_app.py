@@ -253,26 +253,36 @@ def fetch_all():
     out["stocks"] = stx
 
     # HL index perps for weekend (US500 → SPX, USTECH → NDX)
-    def _hl_idx(sym, cash_off, fallback_mult):
+    # CBOE — EXACT SPX/NDX levels (Cloud-reliable, no key). These anchor the perp→index mapping.
+    def _cboe(sym):
+        try:
+            dd = requests.get(f"https://cdn.cboe.com/api/global/delayed_quotes/quotes/{sym}.json",
+                              headers={"User-Agent": NASDAQ_H["User-Agent"]}, timeout=8).json().get("data", {})
+            cur = dd.get("current_price"); cl = dd.get("close") or dd.get("prev_day_close_price")
+            return {"cur": float(cur) if cur else None, "close": float(cl) if cl else None}
+        except Exception:
+            return None
+    out["cboe_spx"], out["cboe_ndx"] = _cboe("_SPX"), _cboe("_NDX")
+
+    def _hl_idx(sym, cal, fallback_mult):
         try:
             m, c = requests.post("https://api.hyperliquid.xyz/info",
                                  json={"type": "metaAndAssetCtxs", "dex": "mkts"}, timeout=8).json()
             names = [u["name"].split(":")[-1] for u in m["universe"]]
             if sym in names:
-                cx = c[names.index(sym)]; mark = float(cx["markPx"])
-                # calibrate ×mult from the official close when available; else the STABLE fallback
-                # (US500 ≈ index/10, USTECH ≈ index/41). Critical: on Streamlit Cloud Yahoo IP-blocks,
-                # so cash_off is None — without the fallback the mult collapsed to ×1 and the page
-                # showed the raw perp mark (SPX ~754, NDX ~726). The scale never drifts (perp tracks
-                # index), so the hardcoded fallback is safe.
-                mult = round(cash_off["last"] / mark) if (cash_off and mark > 0) else fallback_mult
-                prev = float(cx.get("prevDayPx") or mark)
+                cx = c[names.index(sym)]; mark = float(cx["markPx"]); prev = float(cx.get("prevDayPx") or mark)
+                close = cal["close"] if cal else None
+                # PROPER MAPPING (not a hardcoded ×10): scale = real index close / perp's own daily
+                # reference, so terms = close × (mark/prev) = the exact close moved by the perp's 24h
+                # change. Anchors to CBOE's real 7,575.39 instead of SPY×10 (which ran ~0.3% light).
+                # Falls back to the fixed integer scale only if CBOE is unreachable.
+                mult = (close / prev) if (close and prev > 0) else fallback_mult
                 return {"terms": mark * mult, "mult": mult, "chg24h": (mark / prev - 1) * 100 if prev else 0.0}
         except Exception:
             pass
         return None
-    out["hl_spx"] = _hl_idx("US500", out.get("spx_off"), 10)
-    out["hl_ndx"] = _hl_idx("USTECH", out.get("ndx_off"), 41)
+    out["hl_spx"] = _hl_idx("US500", out.get("cboe_spx"), 10)
+    out["hl_ndx"] = _hl_idx("USTECH", out.get("cboe_ndx"), 41)
     return out
 
 
@@ -310,7 +320,7 @@ def index_card(name, cash, fut, basis, off, hl, state, refc=None):
     elif state in ("OVN", "EXT") and fut and basis is not None:
         val, src = fut["px"] - basis, f"futures-implied · {fut['ts']:%-I:%M %p ET}"
     elif hl:                       # robust 24/7 source — weekends, AND weekdays when Yahoo is IP-blocked
-        val, src = hl["terms"], f"Hyperliquid perp ×{hl['mult']} · {hl['chg24h']:+.1f}%/24h"
+        val, src = hl["terms"], f"Hyperliquid perp ×{hl['mult']:.2f} · {hl['chg24h']:+.1f}%/24h"
     elif off:
         val, src = off["last"], "last official close"
     elif cash:
@@ -353,9 +363,8 @@ seg = "".join(f"<span><b>{n}</b> {v}</span>" for n, v in tape)
 if seg:
     st.markdown(f'<div class="tape"><div class="inner">{seg}{seg}</div></div>', unsafe_allow_html=True)
 
-_spy = ref_close(nd, "SPY")
-_spx_ref = _spy * 10 if _spy else None                # Nasdaq has no SPX → SPY×10 proxy for the close
-_ndx_ref = ref_close(nd, "NDX")
+_spx_ref = (d["cboe_spx"] or {}).get("close")                       # exact SPX close (CBOE)
+_ndx_ref = (d["cboe_ndx"] or {}).get("close") or ref_close(nd, "NDX")
 st.markdown('<div class="idxrow">'
             + index_card("S&amp;P 500 · SPX", d["spx"], d["es"], d["es_basis"], d["spx_off"], d["hl_spx"], state, _spx_ref)
             + index_card("NASDAQ 100 · NDX", d["ndx"], d["nq"], d["nq_basis"], d["ndx_off"], d["hl_ndx"], state, _ndx_ref)
