@@ -207,21 +207,26 @@ def fetch_all():
     out["stocks"] = stx
 
     # HL index perps for weekend (US500 → SPX, USTECH → NDX)
-    def _hl_idx(sym, cash_off):
+    def _hl_idx(sym, cash_off, fallback_mult):
         try:
             m, c = requests.post("https://api.hyperliquid.xyz/info",
                                  json={"type": "metaAndAssetCtxs", "dex": "mkts"}, timeout=8).json()
             names = [u["name"].split(":")[-1] for u in m["universe"]]
             if sym in names:
                 cx = c[names.index(sym)]; mark = float(cx["markPx"])
-                mult = round(cash_off["last"] / mark) if (cash_off and mark > 0) else 1
+                # calibrate ×mult from the official close when available; else the STABLE fallback
+                # (US500 ≈ index/10, USTECH ≈ index/41). Critical: on Streamlit Cloud Yahoo IP-blocks,
+                # so cash_off is None — without the fallback the mult collapsed to ×1 and the page
+                # showed the raw perp mark (SPX ~754, NDX ~726). The scale never drifts (perp tracks
+                # index), so the hardcoded fallback is safe.
+                mult = round(cash_off["last"] / mark) if (cash_off and mark > 0) else fallback_mult
                 prev = float(cx.get("prevDayPx") or mark)
-                return {"terms": mark * mult, "chg24h": (mark / prev - 1) * 100 if prev else 0.0}
+                return {"terms": mark * mult, "mult": mult, "chg24h": (mark / prev - 1) * 100 if prev else 0.0}
         except Exception:
             pass
         return None
-    out["hl_spx"] = _hl_idx("US500", out.get("spx_off"))
-    out["hl_ndx"] = _hl_idx("USTECH", out.get("ndx_off"))
+    out["hl_spx"] = _hl_idx("US500", out.get("spx_off"), 10)
+    out["hl_ndx"] = _hl_idx("USTECH", out.get("ndx_off"), 41)
     return out
 
 
@@ -257,17 +262,25 @@ def index_card(name, cash, fut, basis, off, hl, state):
         val, src = cash["px"], f"cash index · {cash['ts']:%-I:%M %p ET}"
     elif state in ("OVN", "EXT") and fut and basis is not None:
         val, src = fut["px"] - basis, f"futures-implied · {fut['ts']:%-I:%M %p ET}"
-    elif state == "WEEKEND" and hl:
-        val, src = hl["terms"], f"Hyperliquid perp · {hl['chg24h']:+.1f}%/24h · thin"
+    elif hl:                       # robust 24/7 source — weekends, AND weekdays when Yahoo is IP-blocked
+        val, src = hl["terms"], f"Hyperliquid perp ×{hl['mult']} · {hl['chg24h']:+.1f}%/24h"
     elif off:
         val, src = off["last"], "last official close"
+    elif cash:
+        val, src = cash["px"], "delayed print"
     else:
-        val, src = (cash["px"] if cash else None), "—"
-    # % change vs the LAST market close: yesterday's settle mid-session, today's settle once closed
+        val, src = None, "—"
+    # % vs the LAST market close (yesterday's settle mid-session, today's once closed);
+    # fall back to the perp's 24h move when the Yahoo close is unavailable
     ref = (off["prev"] if state == "RTH" else off["last"]) if off else None
-    chg = (val / ref - 1) * 100 if (val and ref) else None
-    chs = (f"<span class='{'up' if chg >= 0 else 'dn'}'>{chg:+.2f}% · vs {ref:,.0f} close</span>"
-           if chg is not None else "")
+    if val and ref:
+        c = (val / ref - 1) * 100
+        chs = f"<span class='{'up' if c >= 0 else 'dn'}'>{c:+.2f}% · vs {ref:,.0f} close</span>"
+    elif val and hl:
+        c = hl["chg24h"]
+        chs = f"<span class='{'up' if c >= 0 else 'dn'}'>{c:+.2f}% / 24h</span>"
+    else:
+        chs = ""
     num = f"{val:,.0f}" if val else "—"
     return (f"<div class='idxcard'><div class='name'>{name}</div><div class='num'>{num}</div>"
             f"<div class='chg'>{chs}</div><div class='src'>{src}</div></div>")
