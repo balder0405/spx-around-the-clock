@@ -115,57 +115,38 @@ def _b64(name):
         return None
 
 
-# Nasdaq API — Cloud-reliable last/prev official close (Yahoo IP-blocks datacenters; Nasdaq doesn't).
-NASDAQ_H = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126 Safari/537.36", "Accept": "application/json"}
-NASDAQ_AC = {"DRAM": "etf", "SPY": "etf", "NDX": "index"}   # asset class per symbol (rest = 'stocks')
+# Official closes (the % basis) from CBOE's CDN — fast and Cloud-reliable, fetched SEQUENTIALLY with
+# NO threads. Streamlit Community Cloud's free tier caps thread count + memory; the earlier Nasdaq
+# ThreadPoolExecutor(18) tripped "RuntimeError: can't start new thread" / MemoryError. CBOE's CDN is
+# ~0.3s/call, so all 15 names return in a few seconds. Cached 30 min (closes change once/day).
+CBOE_H = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126"}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def nasdaq_refs():
-    """Parallel-fetch each name's last sale + previous close + market status from Nasdaq. The official
-    daily close (the basis for % change) — reliable from Streamlit Cloud where Yahoo is IP-blocked.
-    Cached 30 min (closes change once/day); parallelized so all ~17 names return in a few seconds."""
+def stock_closes():
     import requests
-    from concurrent.futures import ThreadPoolExecutor
-
-    def _p(s):
-        return float(s.replace("$", "").replace(",", "")) if s and s not in ("N/A", "", "N/D") else None
-
-    def _one(sym):
-        ac = NASDAQ_AC.get(sym, "stocks")
-        out = {"last": None, "prev": None, "status": None}
+    out = {}
+    for s in STOCKS:
         try:
-            i = requests.get(f"https://api.nasdaq.com/api/quote/{sym}/info?assetclass={ac}",
-                             headers=NASDAQ_H, timeout=8).json()
-            p = (i.get("data") or {}).get("primaryData") or {}
-            out["last"] = _p(p.get("lastSalePrice")); out["status"] = (i.get("data") or {}).get("marketStatus")
-            s = requests.get(f"https://api.nasdaq.com/api/quote/{sym}/summary?assetclass={ac}",
-                             headers=NASDAQ_H, timeout=8).json()
-            sd = (s.get("data") or {}).get("summaryData") or {}
-            out["prev"] = _p((sd.get("PreviousClose") or {}).get("value"))
+            d = requests.get(f"https://cdn.cboe.com/api/global/delayed_quotes/quotes/{s}.json",
+                             headers=CBOE_H, timeout=6).json().get("data", {})
+            cl = d.get("close") or d.get("prev_day_close_price")
+            if cl:
+                out[s] = float(cl)
         except Exception:
-            pass
-        return sym, out
-    with ThreadPoolExecutor(max_workers=18) as ex:
-        return dict(ex.map(_one, STOCKS + ["SPY", "NDX"]))
+            continue
+    return out
 
 
 def ref_close(nd, sym):
-    """The last COMPLETED official close: today's settle once the session is over (marketStatus
-    Closed → lastSale), else yesterday's settle while a session is live (→ PreviousClose)."""
-    r = nd.get(sym)
-    if not r:
-        return None
-    is_open = "open" in (r.get("status") or "").lower() or "market open" in (r.get("status") or "").lower()
-    return (r.get("prev") if is_open else r.get("last")) or r.get("last") or r.get("prev")
+    return nd.get(sym)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all():
     # NO yfinance — Yahoo IP-blocks Streamlit Cloud, and blocked calls hung the whole page. Everything
     # now comes from fast, Cloud-reliable, keyless sources: CBOE (index levels + closes), Nasdaq
-    # (stock closes, in nasdaq_refs), and Hyperliquid (24/7 stock + index perp marks).
+    # (stock closes, in stock_closes), and Hyperliquid (24/7 stock + index perp marks).
     import requests
     out = {"asof": datetime.now(ET)}
     stx = {}
@@ -205,7 +186,7 @@ def fetch_all():
     def _cboe(sym):
         try:
             dd = requests.get(f"https://cdn.cboe.com/api/global/delayed_quotes/quotes/{sym}.json",
-                              headers={"User-Agent": NASDAQ_H["User-Agent"]}, timeout=8).json().get("data", {})
+                              headers=CBOE_H, timeout=8).json().get("data", {})
             cur = dd.get("current_price"); cl = dd.get("close") or dd.get("prev_day_close_price")
             return {"cur": float(cur) if cur else None, "close": float(cl) if cl else None}
         except Exception:
@@ -256,7 +237,7 @@ def next_open(now):
 
 
 d = fetch_all()
-nd = nasdaq_refs()                                    # Cloud-reliable official closes (% basis)
+nd = stock_closes()                                   # CBOE official stock closes (% basis), thread-free
 now = d["asof"]
 state, state_txt, scol = market_state(now)
 us_session = (now.weekday() < 5 and 240 <= now.hour * 60 + now.minute < 1200)   # 4:00–20:00 ET
@@ -307,7 +288,7 @@ if seg:
     st.markdown(f'<div class="tape"><div class="inner">{seg}{seg}</div></div>', unsafe_allow_html=True)
 
 _spx_ref = (d["cboe_spx"] or {}).get("close")                       # exact SPX close (CBOE)
-_ndx_ref = (d["cboe_ndx"] or {}).get("close") or ref_close(nd, "NDX")
+_ndx_ref = (d["cboe_ndx"] or {}).get("close")                       # exact NDX close (CBOE)
 st.markdown('<div class="idxrow">'
             + index_card("S&amp;P 500 · SPX", d["cboe_spx"], d["hl_spx"], state, _spx_ref)
             + index_card("NASDAQ 100 · NDX", d["cboe_ndx"], d["hl_ndx"], state, _ndx_ref)
