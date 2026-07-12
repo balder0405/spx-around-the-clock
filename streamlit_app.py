@@ -164,70 +164,12 @@ def ref_close(nd, sym):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all():
-    import requests, yfinance as yf
+    # NO yfinance — Yahoo IP-blocks Streamlit Cloud, and blocked calls hung the whole page. Everything
+    # now comes from fast, Cloud-reliable, keyless sources: CBOE (index levels + closes), Nasdaq
+    # (stock closes, in nasdaq_refs), and Hyperliquid (24/7 stock + index perp marks).
+    import requests
     out = {"asof": datetime.now(ET)}
-
-    def _last(ticker, period="5d", interval="5m", prepost=False):
-        try:
-            h = yf.download(ticker, period=period, interval=interval, progress=False,
-                            auto_adjust=True, prepost=prepost, timeout=8)
-            h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
-            px = h["Close"].dropna()
-            if px.empty:
-                return None
-            ts = px.index[-1]
-            ts = ts.tz_convert(ET) if ts.tzinfo else ts.tz_localize("UTC").tz_convert(ET)
-            return {"px": float(px.iloc[-1]), "ts": ts, "series": px.tail(600)}
-        except Exception:
-            return None
-
-    out["spx"], out["es"] = _last("^GSPC"), _last("ES=F")
-    out["ndx"], out["nq"] = _last("^NDX", interval="15m"), _last("NQ=F", interval="15m")
-    out["vix"] = _last("^VIX", interval="1h")
-    out["btc"] = _last("BTC-USD", period="3d", interval="1h")
-
-    def _official(ticker):
-        try:
-            h = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=True, timeout=8)
-            h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
-            px = h["Close"].dropna()
-            # last = most recent daily settle (today's after close, else yesterday's); prev = the one before.
-            return {"last": float(px.iloc[-1]), "prev": float(px.iloc[-2]) if len(px) > 1 else float(px.iloc[-1])}
-        except Exception:
-            return None
-    out["spx_off"], out["ndx_off"] = _official("^GSPC"), _official("^NDX")
-
-    def _basis(cash, fut):
-        try:
-            if cash and fut:
-                j = pd.concat([cash["series"], fut["series"]], axis=1, keys=["c", "f"], sort=False).dropna()
-                if len(j) > 10:
-                    return float((j["f"] - j["c"]).median())
-        except Exception:
-            pass
-        return None
-    out["es_basis"], out["nq_basis"] = _basis(out["spx"], out["es"]), _basis(out["ndx"], out["nq"])
-
-    # stocks: batch extended-hours 5m + daily prev close
     stx = {}
-    try:
-        h = yf.download(STOCKS, period="2d", interval="5m", prepost=True, progress=False, auto_adjust=True, timeout=15)
-        cl = h["Close"]
-        dl = yf.download(STOCKS, period="6d", interval="1d", progress=False, auto_adjust=True, timeout=15)["Close"]
-        for s in STOCKS:
-            try:
-                px = cl[s].dropna() if s in cl else pd.Series(dtype=float)
-                dd = dl[s].dropna() if s in dl else pd.Series(dtype=float)
-                if px.empty:
-                    continue
-                ts = px.index[-1]; ts = ts.tz_convert(ET) if ts.tzinfo else ts.tz_localize("UTC").tz_convert(ET)
-                _cl = float(dd.iloc[-1]) if len(dd) else float(px.iloc[-1])
-                _cp = float(dd.iloc[-2]) if len(dd) > 1 else _cl
-                stx[s] = {"real": float(px.iloc[-1]), "ts": ts, "close_last": _cl, "close_prev": _cp}
-            except Exception:
-                continue
-    except Exception:
-        pass
 
     # Hyperliquid single-stock perp marks (24/7). Best (highest-volume) dex per name + #venues.
     try:
@@ -252,7 +194,14 @@ def fetch_all():
         pass
     out["stocks"] = stx
 
-    # HL index perps for weekend (US500 → SPX, USTECH → NDX)
+    # BTC for the tape — Hyperliquid main dex, 24/7
+    try:
+        m, c = requests.post("https://api.hyperliquid.xyz/info", json={"type": "metaAndAssetCtxs"}, timeout=8).json()
+        names = [u["name"] for u in m["universe"]]
+        out["btc"] = float(c[names.index("BTC")]["markPx"]) if "BTC" in names else None
+    except Exception:
+        out["btc"] = None
+
     # CBOE — EXACT SPX/NDX levels (Cloud-reliable, no key). These anchor the perp→index mapping.
     def _cboe(sym):
         try:
@@ -262,7 +211,7 @@ def fetch_all():
             return {"cur": float(cur) if cur else None, "close": float(cl) if cl else None}
         except Exception:
             return None
-    out["cboe_spx"], out["cboe_ndx"] = _cboe("_SPX"), _cboe("_NDX")
+    out["cboe_spx"], out["cboe_ndx"], out["cboe_vix"] = _cboe("_SPX"), _cboe("_NDX"), _cboe("_VIX")
 
     def _hl_idx(sym, cal, fallback_mult):
         try:
@@ -314,22 +263,16 @@ state, state_txt, scol = market_state(now)
 us_session = (now.weekday() < 5 and 240 <= now.hour * 60 + now.minute < 1200)   # 4:00–20:00 ET
 
 
-def index_card(name, cash, fut, basis, off, hl, state, refc=None):
-    if state == "RTH" and cash:
-        val, src = cash["px"], f"cash index · {cash['ts']:%-I:%M %p ET}"
-    elif state in ("OVN", "EXT") and fut and basis is not None:
-        val, src = fut["px"] - basis, f"futures-implied · {fut['ts']:%-I:%M %p ET}"
-    elif hl:                       # robust 24/7 source — weekends, AND weekdays when Yahoo is IP-blocked
+def index_card(name, cboe, hl, state, refc=None):
+    if state == "RTH" and cboe and cboe.get("cur"):
+        val, src = cboe["cur"], "cash index · CBOE"
+    elif hl:                       # 24/7 source — overnight, weekends (perp mapped to the real close)
         val, src = hl["terms"], f"Hyperliquid perp ×{hl['mult']:.2f} · {hl['chg24h']:+.1f}%/24h"
-    elif off:
-        val, src = off["last"], "last official close"
-    elif cash:
-        val, src = cash["px"], "delayed print"
+    elif cboe and cboe.get("close"):
+        val, src = cboe["close"], "last close · CBOE"
     else:
         val, src = None, "—"
-    # % vs the LAST market close — Nasdaq official close (refc) first (works on Cloud), then the
-    # Yahoo close, then the perp's 24h move as the last resort.
-    ref = refc or ((off["prev"] if state == "RTH" else off["last"]) if off else None)
+    ref = refc                     # the real official close (CBOE), the % basis
     if val and ref:
         c = (val / ref - 1) * 100
         chs = f"<span class='{'up' if c >= 0 else 'dn'}'>{c:+.2f}% · vs {ref:,.0f} close</span>"
@@ -352,9 +295,10 @@ st.markdown(f"""<div class="hero">
 </div>""", unsafe_allow_html=True)
 
 tape = []
-if d["es"]: tape.append(("ES", f"{d['es']['px']:,.0f}"))
-if d["nq"]: tape.append(("NQ", f"{d['nq']['px']:,.0f}"))
-if d["vix"]: tape.append(("VIX", f"{d['vix']['px']:.1f}"))
+if (d.get("cboe_spx") or {}).get("cur"): tape.append(("SPX", f"{d['cboe_spx']['cur']:,.0f}"))
+if (d.get("cboe_ndx") or {}).get("cur"): tape.append(("NDX", f"{d['cboe_ndx']['cur']:,.0f}"))
+if (d.get("cboe_vix") or {}).get("cur"): tape.append(("VIX", f"{d['cboe_vix']['cur']:.1f}"))
+if d.get("btc"): tape.append(("BTC", f"{d['btc']:,.0f}"))
 for s in STOCKS:
     st_ = d["stocks"].get(s)
     if st_ and st_.get("hl"):
@@ -366,8 +310,8 @@ if seg:
 _spx_ref = (d["cboe_spx"] or {}).get("close")                       # exact SPX close (CBOE)
 _ndx_ref = (d["cboe_ndx"] or {}).get("close") or ref_close(nd, "NDX")
 st.markdown('<div class="idxrow">'
-            + index_card("S&amp;P 500 · SPX", d["spx"], d["es"], d["es_basis"], d["spx_off"], d["hl_spx"], state, _spx_ref)
-            + index_card("NASDAQ 100 · NDX", d["ndx"], d["nq"], d["nq_basis"], d["ndx_off"], d["hl_ndx"], state, _ndx_ref)
+            + index_card("S&amp;P 500 · SPX", d["cboe_spx"], d["hl_spx"], state, _spx_ref)
+            + index_card("NASDAQ 100 · NDX", d["cboe_ndx"], d["hl_ndx"], state, _ndx_ref)
             + '</div>', unsafe_allow_html=True)
 
 st.markdown(f"""<div class="minicta">
