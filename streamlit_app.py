@@ -22,7 +22,8 @@ except Exception:
     pass
 
 # ── single stocks with a REAL 24/7 venue (Hyperliquid builder-dex perps, marks ≈ spot <1%) ──
-STOCKS = ["NVDA", "MU", "MRVL", "DRAM", "INTC", "TSM", "CRWV", "META", "GOOGL", "AAPL", "AMZN", "NFLX", "NOK"]
+STOCKS = ["NVDA", "TSLA", "MU", "MRVL", "DRAM", "INTC", "TSM", "CRWV", "META", "GOOGL", "AAPL", "AMZN",
+          "NFLX", "NOK", "SPCX"]
 THIN = {"NFLX", "NOK"}                       # shown with a thin-venue caveat
 HL_STOCK_DEXES = ["xyz", "cash", "km", "mkts"]
 
@@ -71,6 +72,20 @@ h1,h2,h3,p,span,div {font-family: -apple-system,'Segoe UI',Helvetica,Arial,sans-
 .scard .meta {color:#64748b; font-size:10.5px; margin-top:6px;}
 .note {background: rgba(96,165,250,.07); border:1px solid rgba(96,165,250,.25); border-radius:12px;
   padding:11px 15px; color:#93c5fd; font-size:12.5px; margin:14px 0;}
+/* product cards */
+.prodgrid {display:flex; flex-wrap:wrap; gap:11px;}
+.prod {box-sizing:border-box; width: calc(50% - 6px); background: rgba(255,255,255,.035);
+  border:1px solid rgba(148,163,184,.15); border-radius:14px; padding:14px 16px;}
+.prod .pi {font-size:19px;}
+.prod .pt {font-weight:800; color:#f1f5f9; font-size:14.5px; margin:3px 0 3px;}
+.prod .pd {color:#93a3b8; font-size:12.5px; line-height:1.5;}
+.prod.found {border-color: rgba(249,115,22,.4);
+  background: linear-gradient(160deg, rgba(249,115,22,.10), rgba(255,255,255,.02));}
+.prod .badge {display:inline-block; background:linear-gradient(90deg,#f97316,#fb923c); color:#fff;
+  font-size:9.5px; font-weight:800; letter-spacing:1px; padding:2px 8px; border-radius:8px; margin-left:6px; vertical-align:middle;}
+.offer {text-align:center; background:linear-gradient(120deg,#7c3aed,#4338ca); border-radius:12px;
+  padding:11px 16px; color:#fff; margin:11px 0 2px; font-size:13.5px; font-weight:700;}
+@media (max-width: 720px) { .prod {width: 100%;} }
 .minicta {display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin:16px 0 4px;}
 .mbtn {display:inline-flex; align-items:center; gap:7px; padding:9px 20px; border-radius:999px; font-weight:800; font-size:13.5px; text-decoration:none !important;}
 .mbtn.sub {background: linear-gradient(90deg,#f97316,#fb923c); color:#fff !important; box-shadow: 0 4px 20px rgba(249,115,22,.4);}
@@ -130,7 +145,8 @@ def fetch_all():
             h = yf.download(ticker, period="5d", interval="1d", progress=False, auto_adjust=True, timeout=8)
             h.columns = [c[0] if isinstance(c, tuple) else c for c in h.columns]
             px = h["Close"].dropna()
-            return {"px": float(px.iloc[-1]), "prev": float(px.iloc[-2]) if len(px) > 1 else float(px.iloc[-1])}
+            # last = most recent daily settle (today's after close, else yesterday's); prev = the one before.
+            return {"last": float(px.iloc[-1]), "prev": float(px.iloc[-2]) if len(px) > 1 else float(px.iloc[-1])}
         except Exception:
             return None
     out["spx_off"], out["ndx_off"] = _official("^GSPC"), _official("^NDX")
@@ -159,8 +175,9 @@ def fetch_all():
                 if px.empty:
                     continue
                 ts = px.index[-1]; ts = ts.tz_convert(ET) if ts.tzinfo else ts.tz_localize("UTC").tz_convert(ET)
-                stx[s] = {"real": float(px.iloc[-1]), "ts": ts,
-                          "prev_close": float(dd.iloc[-1]) if len(dd) else float(px.iloc[-1])}
+                _cl = float(dd.iloc[-1]) if len(dd) else float(px.iloc[-1])
+                _cp = float(dd.iloc[-2]) if len(dd) > 1 else _cl
+                stx[s] = {"real": float(px.iloc[-1]), "ts": ts, "close_last": _cl, "close_prev": _cp}
             except Exception:
                 continue
     except Exception:
@@ -197,7 +214,7 @@ def fetch_all():
             names = [u["name"].split(":")[-1] for u in m["universe"]]
             if sym in names:
                 cx = c[names.index(sym)]; mark = float(cx["markPx"])
-                mult = round(cash_off["px"] / mark) if (cash_off and mark > 0) else 1
+                mult = round(cash_off["last"] / mark) if (cash_off and mark > 0) else 1
                 prev = float(cx.get("prevDayPx") or mark)
                 return {"terms": mark * mult, "chg24h": (mark / prev - 1) * 100 if prev else 0.0}
         except Exception:
@@ -243,12 +260,14 @@ def index_card(name, cash, fut, basis, off, hl, state):
     elif state == "WEEKEND" and hl:
         val, src = hl["terms"], f"Hyperliquid perp · {hl['chg24h']:+.1f}%/24h · thin"
     elif off:
-        val, src = off["px"], "last official close"
+        val, src = off["last"], "last official close"
     else:
         val, src = (cash["px"] if cash else None), "—"
-    prev = off["prev"] if off else None
-    chg = (val / prev - 1) * 100 if (val and prev) else None
-    chs = f"<span class='{'up' if chg >= 0 else 'dn'}'>{chg:+.2f}% since close</span>" if chg is not None else ""
+    # % change vs the LAST market close: yesterday's settle mid-session, today's settle once closed
+    ref = (off["prev"] if state == "RTH" else off["last"]) if off else None
+    chg = (val / ref - 1) * 100 if (val and ref) else None
+    chs = (f"<span class='{'up' if chg >= 0 else 'dn'}'>{chg:+.2f}% · vs {ref:,.0f} close</span>"
+           if chg is not None else "")
     num = f"{val:,.0f}" if val else "—"
     return (f"<div class='idxcard'><div class='name'>{name}</div><div class='num'>{num}</div>"
             f"<div class='chg'>{chs}</div><div class='src'>{src}</div></div>")
@@ -305,8 +324,9 @@ for s in STOCKS:
         px = st_["real"]; badge = ("bext", "LAST"); src = f"last print · {st_['ts']:%-I:%M %p ET}"
     else:
         continue
-    prev = st_.get("prev_close")
-    chg = (px / prev - 1) * 100 if prev else None
+    # % vs last market close; for HL-only names (no US listing, e.g. SPCX) fall back to the perp's 24h ref
+    ref = (st_.get("close_prev") if state == "RTH" else st_.get("close_last")) or (hl.get("prev") if hl else None)
+    chg = (px / ref - 1) * 100 if ref else None
     chs = f"<div class='ch {'up' if chg >= 0 else 'dn'}'>{chg:+.2f}%</div>" if chg is not None else ""
     dec = 2 if px < 1000 else 0
     cards += (f"<div class='scard'><span class='bdg {badge[0]}'>{badge[1]}</span>"
@@ -320,6 +340,31 @@ st.markdown('<div class="note">🌐 <b>How the 24/7 stock marks work:</b> outsid
             'During US hours (4 AM–8 PM ET) we show the real consolidated print instead. '
             'Only names with a genuine 24/7 venue are listed — we never fabricate an overnight quote.</div>',
             unsafe_allow_html=True)
+
+# ── products / membership ──
+st.markdown('<div class="sechead">What we build 🐲 · inside the membership</div>', unsafe_allow_html=True)
+_PRODUCTS = [
+    ("🐲", "Fable Picks 龙气榜", "Our AI quant desk's nightly read &amp; top picks — a full model ensemble raced "
+     "head-to-head every night, distilled to the names actually worth watching.", False),
+    ("📰", "KOL Read + Pulse", "Every 3 days: the few <b>validated</b> arguments from 160+ finance KOLs "
+     "(logic, why it holds, what would break it) + a live attention &amp; sentiment board.", False),
+    ("⭐", "Spotlight Articles", "Curated deep-dives on the moves that matter — the signal pulled out of the noise.", False),
+    ("💬", "Direct Group Chat", "Talk markets with us and the community in real time — reads, setups, and questions.", False),
+    ("🛠️", "Development Notes", "Behind-the-scenes build reports on the system as it evolves — how the models "
+     "and tools actually work.", True),
+    ("🤖", "Early &amp; Agentic AI", "First access to every new AI tool, plus our agentic-AI trading tooling as it ships.", True),
+]
+_cards = ""
+for icon, title, desc, founding in _PRODUCTS:
+    badge = "<span class='badge'>FOUNDING</span>" if founding else ""
+    _cards += (f"<div class='prod{' found' if founding else ''}'><span class='pi'>{icon}</span>"
+               f"<div class='pt'>{title}{badge}</div><div class='pd'>{desc}</div></div>")
+st.markdown(f'<div class="prodgrid">{_cards}</div>', unsafe_allow_html=True)
+st.markdown('<div class="offer">🎁 20% off annual &amp; group subscriptions</div>', unsafe_allow_html=True)
+st.markdown(f"""<div class="minicta">
+  <a class="mbtn sub" href="{SUBSTACK}" target="_blank">📬 Become a member — on Substack</a>
+  <a class="mbtn x" href="{XLINK}" target="_blank">𝕏 Follow @Balder13946731</a>
+</div>""", unsafe_allow_html=True)
 
 st.markdown('<div class="sechead">Follow the desk 🐾</div>', unsafe_allow_html=True)
 st.markdown(f"""<div class="minicta">
